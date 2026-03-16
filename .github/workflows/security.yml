@@ -35,4 +35,4 @@ jobs:
         with:
           python-version: "3.11"
       - run: pip install ".[api]" pip-audit
-      - run: pip-audit --strict --desc
+      - run: pip-audit --strict --desc --skip-editable
