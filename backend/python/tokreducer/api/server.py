@@ -12,6 +12,7 @@ Provides:
 from __future__ import annotations
 
 import argparse
+import asyncio
 import hashlib
 import hmac
 import json
@@ -35,8 +36,18 @@ from pydantic import BaseModel, Field
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from tokreducer.compressor import TokReducer, Level
+from tokreducer.rust_compressor import RustCompressor
 
 logger = logging.getLogger("tokreducer")
+
+_RUST_COMPRESSOR_URL = os.environ.get("RUST_COMPRESSOR_URL", "").strip()
+
+
+def _get_compressor(level: Level | int, bidirectional: bool = False):
+    """Return RustCompressor if RUST_COMPRESSOR_URL is set, else TokReducer."""
+    if _RUST_COMPRESSOR_URL:
+        return RustCompressor(level=level, bidirectional=bidirectional, base_url=_RUST_COMPRESSOR_URL)
+    return TokReducer(level=level, bidirectional=bidirectional)
 
 # ---------------------------------------------------------------------------
 # Firebase init
@@ -515,7 +526,7 @@ def health() -> dict[str, str]:
 @app.post("/compress", response_model=CompressResponse)
 def compress_endpoint(request: Request, req: CompressRequest, uid: str = Depends(_get_uid)) -> CompressResponse:
     ip, ua = _req_meta(request)
-    tok = TokReducer(level=req.level)
+    tok = _get_compressor(req.level)
     compressed = tok.compress(req.prompt)
     _add_audit_log(uid, action="compress", ip=ip, user_agent=ua, details={"level": req.level})
     return CompressResponse(
@@ -529,7 +540,7 @@ def compress_endpoint(request: Request, req: CompressRequest, uid: str = Depends
 @app.post("/decompress", response_model=DecompressResponse)
 def decompress_endpoint(request: Request, req: DecompressRequest, uid: str = Depends(_get_uid)) -> DecompressResponse:
     ip, ua = _req_meta(request)
-    tok = TokReducer(level=Level.MEDIUM, bidirectional=True)
+    tok = _get_compressor(Level.MEDIUM, bidirectional=True)
     _add_audit_log(uid, action="decompress", ip=ip, user_agent=ua)
     return DecompressResponse(decompressed=tok.decompress(req.text))
 
@@ -539,8 +550,8 @@ async def chat_endpoint(request: Request, req: ChatRequest, uid: str = Depends(_
     """Full pipeline: compress -> call LLM -> return response."""
     ip, ua = _req_meta(request)
     _add_audit_log(uid, action="chat", ip=ip, user_agent=ua, details={"provider": req.provider, "model": req.model})
-    tok = TokReducer(level=req.level)
-    compressed = tok.compress(req.prompt)
+    tok = _get_compressor(req.level)
+    compressed = await asyncio.to_thread(tok.compress, req.prompt)
     system = tok.system_prompt()
 
     api_key = req.api_key or os.environ.get(_ENV_KEY_MAP.get(req.provider, ""), "")
@@ -559,12 +570,17 @@ async def chat_endpoint(request: Request, req: ChatRequest, uid: str = Depends(_
         api_key=api_key,
     )
 
+    orig_tok = await asyncio.to_thread(tok.count, req.prompt)
+    comp_tok = await asyncio.to_thread(tok.count, compressed)
+    red_pct = await asyncio.to_thread(tok.reduction_pct, req.prompt, compressed)
+    out_tok = await asyncio.to_thread(tok.count, response_text)
+
     return ChatResponse(
         response=response_text,
-        original_tokens=tok.count(req.prompt),
-        compressed_tokens=tok.count(compressed),
-        reduction_pct=tok.reduction_pct(req.prompt, compressed),
-        output_tokens=tok.count(response_text),
+        original_tokens=orig_tok,
+        compressed_tokens=comp_tok,
+        reduction_pct=red_pct,
+        output_tokens=out_tok,
     )
 
 
@@ -828,7 +844,7 @@ async def proxy_chat_completions(request: Request, uid: str = Depends(_get_uid))
     if not api_key and provider != "ollama":
         raise HTTPException(status_code=400, detail="No API key configured. Set one via the dashboard.")
 
-    tok = TokReducer(level=level)
+    tok = _get_compressor(level)
     system_prompt = tok.system_prompt()
 
     messages: list[dict[str, Any]] = body.get("messages", [])
@@ -844,16 +860,17 @@ async def proxy_chat_completions(request: Request, uid: str = Depends(_get_uid))
         content = msg.get("content", "")
         if role == "user" and isinstance(content, str):
             original_text_parts.append(content)
-            compressed_messages.append({"role": role, "content": tok.compress(content)})
+            compressed_messages.append({"role": role, "content": await asyncio.to_thread(tok.compress, content)})
         elif role == "system":
             compressed_messages.append({"role": role, "content": content + "\n\n" + system_prompt})
         else:
             compressed_messages.append(msg)
 
-    original_tokens = sum(tok.count(t) for t in original_text_parts)
-    compressed_tokens = sum(
-        tok.count(m["content"]) for m in compressed_messages if m.get("role") == "user"
-    )
+    original_tokens = sum([await asyncio.to_thread(tok.count, t) for t in original_text_parts])
+    compressed_tokens = sum([
+        await asyncio.to_thread(tok.count, m["content"])
+        for m in compressed_messages if m.get("role") == "user"
+    ])
 
     t0 = time.monotonic()
     status = "ok"
@@ -879,15 +896,17 @@ async def proxy_chat_completions(request: Request, uid: str = Depends(_get_uid))
     except Exception as exc:
         status = "error"
         latency_ms = int((time.monotonic() - t0) * 1000)
+        reduction_for_log = await asyncio.to_thread(
+            tok.reduction_pct,
+            " ".join(original_text_parts),
+            " ".join(m["content"] for m in compressed_messages if m.get("role") == "user"),
+        ) if original_text_parts else 0.0
         _add_log_entry(
             uid,
             model=model,
             original_tokens=original_tokens,
             compressed_tokens=compressed_tokens,
-            reduction_pct=tok.reduction_pct(
-                " ".join(original_text_parts),
-                " ".join(m["content"] for m in compressed_messages if m.get("role") == "user"),
-            ) if original_text_parts else 0.0,
+            reduction_pct=reduction_for_log,
             output_tokens=0,
             latency_ms=latency_ms,
             status=status,
@@ -899,7 +918,7 @@ async def proxy_chat_completions(request: Request, uid: str = Depends(_get_uid))
         raise HTTPException(status_code=502, detail=str(exc))
 
     latency_ms = int((time.monotonic() - t0) * 1000)
-    output_tokens = tok.count(response_text)
+    output_tokens = await asyncio.to_thread(tok.count, response_text)
     reduction = 0.0
     if original_tokens > 0:
         reduction = (1 - compressed_tokens / original_tokens) * 100

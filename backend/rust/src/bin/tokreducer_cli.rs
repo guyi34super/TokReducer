@@ -83,6 +83,28 @@ async fn serve(host: String, port: u16, default_level: u8) {
         decompressed: String,
     }
 
+    #[derive(Deserialize)]
+    struct CountReq {
+        text: String,
+    }
+
+    #[derive(Serialize)]
+    struct CountRes {
+        tokens: usize,
+    }
+
+    #[derive(Deserialize)]
+    struct ReductionPctReq {
+        raw: String,
+        compressed: String,
+        level: Option<u8>,
+    }
+
+    #[derive(Serialize)]
+    struct ReductionPctRes {
+        reduction_pct: f64,
+    }
+
     #[derive(Serialize)]
     struct HealthRes {
         status: String,
@@ -114,6 +136,16 @@ async fn serve(host: String, port: u16, default_level: u8) {
             Json(DecompressRes {
                 decompressed: tok.decompress(&req.text),
             })
+        }))
+        .route("/count", post(|Json(req): Json<CountReq>| async move {
+            let n = tokreducer::tokenizer::count_tokens(&req.text);
+            Json(CountRes { tokens: n })
+        }))
+        .route("/reduction_pct", post(move |Json(req): Json<ReductionPctReq>| async move {
+            let level = Level::from_u8(req.level.unwrap_or(dl));
+            let tok = TokReducer::new(level);
+            let pct = tok.reduction_pct(&req.raw, &req.compressed);
+            Json(ReductionPctRes { reduction_pct: pct })
         }));
 
     let addr = format!("{host}:{port}");

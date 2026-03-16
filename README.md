@@ -32,22 +32,29 @@ pip install -e "./backend/python[testing]"
 
 ### Rust
 
+The Rust implementation provides a high-performance compression engine. When `RUST_COMPRESSOR_URL` is set, the Python backend delegates all compression to the Rust service.
+
 ```bash
 cd backend/rust
 cargo build --lib
 
-# With CLI (includes REST API server)
+# With CLI (REST API server for compress/decompress)
 cargo build --features cli
 ```
+
+Run the Rust compressor locally: `tokreducer-cli serve --port 8081`, then set `RUST_COMPRESSOR_URL=http://localhost:8081`.
 
 ### Docker
 
 ```bash
-# Start everything (backend + frontend)
+# Start everything (rust-compressor + backend + frontend)
 docker compose up --build
 
+# Rust compressor (internal): http://rust-compressor:8081
 # Backend at http://localhost:8080, Dashboard at http://localhost:3000
 ```
+
+When running in Docker, the Python backend uses the Rust compressor service for all compress/decompress operations. Set `RUST_COMPRESSOR_URL` in `.env` to override (e.g. for local dev with Rust running separately).
 
 ## Python Usage
 
