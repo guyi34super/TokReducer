@@ -1,0 +1,1 @@
+{"root":["./src/app.tsx","./src/api.ts","./src/firebase.ts","./src/main.tsx","./src/components/errorboundary.tsx","./src/context/authcontext.tsx","./src/pages/agreement.tsx","./src/pages/connections.tsx","./src/pages/login.tsx","./src/pages/logs.tsx","./src/utils/sanitize.ts"],"version":"5.9.3"}
