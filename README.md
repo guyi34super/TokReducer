@@ -227,6 +227,4 @@ cargo test
 | Summary | `>sum` | Summarize |
 | List | `•list` | Bullet point list |
 
-## License
 
-MIT — Free to use and extend.
