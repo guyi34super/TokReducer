@@ -24,6 +24,25 @@ echo "[2/3] Installing frontend dependencies..."
 cd "$ROOT/web"
 npm install --silent 2>/dev/null || npm install
 
+# --- Rust compressor (optional) ---
+RUST_PID=""
+if command -v cargo &>/dev/null; then
+    echo "[2.5/3] Building Rust compressor..."
+    cd "$ROOT/backend/rust"
+    if cargo build --release --features cli 2>/dev/null; then
+        ./target/release/tokreducer-cli serve --port 8081 &
+        RUST_PID=$!
+        export RUST_COMPRESSOR_URL=http://localhost:8081
+        echo "  Rust compressor -> http://localhost:8081"
+        sleep 1
+    else
+        echo "  Rust build skipped (Python compressor will be used)"
+    fi
+    cd "$ROOT"
+else
+    echo "  Rust not installed (Python compressor will be used)"
+fi
+
 # --- Start both ---
 echo "[3/3] Starting services..."
 echo ""
@@ -45,6 +64,7 @@ cleanup() {
     echo "Shutting down..."
     kill $BACKEND_PID 2>/dev/null
     kill $FRONTEND_PID 2>/dev/null
+    [ -n "$RUST_PID" ] && kill $RUST_PID 2>/dev/null
     exit 0
 }
 

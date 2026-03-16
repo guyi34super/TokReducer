@@ -1,9 +1,22 @@
 services:
+  rust-compressor:
+    build: backend/rust
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8081/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    expose:
+      - "8081"
+
   backend:
     build: backend/python
     env_file:
       - path: .env
         required: false
+    environment:
+      RUST_COMPRESSOR_URL: "http://rust-compressor:8081"
     restart: unless-stopped
     deploy:
       replicas: 3
@@ -14,6 +27,9 @@ services:
       retries: 3
     expose:
       - "8080"
+    depends_on:
+      rust-compressor:
+        condition: service_healthy
 
   frontend:
     build: web
