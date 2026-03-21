@@ -1,34 +1,20 @@
-import { useEffect, useState } from "react";
+import { useEffect } from "react";
 import { BrowserRouter, Routes, Route, Navigate, useNavigate, useLocation } from "react-router-dom";
 import { AuthProvider, useAuth } from "./context/AuthContext";
-import { setTokenGetter, checkAgreement } from "./api";
+import { setTokenGetter } from "./api";
 import ErrorBoundary from "./components/ErrorBoundary";
 import Login from "./pages/Login";
-import Agreement from "./pages/Agreement";
+import VerifyEmail from "./pages/VerifyEmail";
 import Connections from "./pages/Connections";
 import Logs from "./pages/Logs";
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
-  const { user, loading, idToken } = useAuth();
-  const [agreementChecked, setAgreementChecked] = useState(false);
-  const [agreementAccepted, setAgreementAccepted] = useState(false);
+  const { user, loading } = useAuth();
   const location = useLocation();
-
-  useEffect(() => {
-    if (user && idToken) {
-      checkAgreement()
-        .then((s) => {
-          setAgreementAccepted(s.accepted);
-          setAgreementChecked(true);
-        })
-        .catch(() => setAgreementChecked(true));
-    }
-  }, [user, idToken]);
 
   if (loading) return <div className="loading">Loading...</div>;
   if (!user) return <Navigate to="/login" state={{ from: location }} replace />;
-  if (!agreementChecked) return <div className="loading">Loading...</div>;
-  if (!agreementAccepted) return <Navigate to="/agreement" replace />;
+  if (!user.emailVerified) return <Navigate to="/verify-email" replace />;
   return <>{children}</>;
 }
 
@@ -41,12 +27,20 @@ function AppShell() {
     setTokenGetter(() => idToken);
   }, [idToken]);
 
-  if (location.pathname === "/login" || (location.pathname === "/agreement" && !user)) {
+  if (!user) {
     return (
       <Routes>
         <Route path="/login" element={<Login />} />
-        <Route path="/agreement" element={<Agreement />} />
         <Route path="*" element={<Navigate to="/login" replace />} />
+      </Routes>
+    );
+  }
+
+  if (user && !user.emailVerified) {
+    return (
+      <Routes>
+        <Route path="/verify-email" element={<VerifyEmail />} />
+        <Route path="*" element={<Navigate to="/verify-email" replace />} />
       </Routes>
     );
   }
@@ -70,17 +64,11 @@ function AppShell() {
           >
             Request Log
           </button>
-          <button
-            className={currentPath === "/agreement" ? "nav-btn active" : "nav-btn"}
-            onClick={() => navigate("/agreement")}
-          >
-            Agreement
-          </button>
         </nav>
         {user && (
           <div className="auth-bar">
             <span className="auth-email">{user.email}</span>
-            <button className="btn btn-sm" onClick={logout}>
+            <button className="btn btn-sm" onClick={async () => { await logout(); navigate("/login"); }}>
               Log Out
             </button>
           </div>
@@ -90,7 +78,6 @@ function AppShell() {
         <Routes>
           <Route path="/" element={<ProtectedRoute><Connections /></ProtectedRoute>} />
           <Route path="/logs" element={<ProtectedRoute><Logs /></ProtectedRoute>} />
-          <Route path="/agreement" element={<Agreement />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </main>

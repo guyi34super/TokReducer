@@ -50,19 +50,33 @@ def _get_compressor(level: Level | int, bidirectional: bool = False):
     return TokReducer(level=level, bidirectional=bidirectional)
 
 # ---------------------------------------------------------------------------
-# Firebase init
+# Firebase init (optional when no credentials, e.g. in Docker without ADC)
+# Supports: GOOGLE_APPLICATION_CREDENTIALS (file path) or
+#           GOOGLE_APPLICATION_CREDENTIALS_JSON (JSON string, e.g. from secrets manager)
 # ---------------------------------------------------------------------------
 
 _FIREBASE_CRED_PATH = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "")
+_FIREBASE_CRED_JSON = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS_JSON", "").strip()
 
+_db: firestore.Client | None = None
 if not firebase_admin._apps:
-    if _FIREBASE_CRED_PATH and os.path.isfile(_FIREBASE_CRED_PATH):
+    if _FIREBASE_CRED_JSON:
+        try:
+            cred_dict = json.loads(_FIREBASE_CRED_JSON)
+            cred = credentials.Certificate(cred_dict)
+            firebase_admin.initialize_app(cred)
+            _db = firestore.client()
+        except (json.JSONDecodeError, ValueError) as e:
+            logger.warning("Invalid GOOGLE_APPLICATION_CREDENTIALS_JSON: %s. Firebase disabled.", e)
+    elif _FIREBASE_CRED_PATH and os.path.isfile(_FIREBASE_CRED_PATH):
         cred = credentials.Certificate(_FIREBASE_CRED_PATH)
         firebase_admin.initialize_app(cred)
+        _db = firestore.client()
     else:
-        firebase_admin.initialize_app()
-
-_db = firestore.client()
+        logger.warning(
+            "Firebase credentials not found (GOOGLE_APPLICATION_CREDENTIALS or GOOGLE_APPLICATION_CREDENTIALS_JSON). "
+            "Auth and Firestore features disabled."
+        )
 
 # ---------------------------------------------------------------------------
 # App
@@ -263,6 +277,12 @@ async def _get_uid(request: Request) -> str:
     if request.url.path in _PUBLIC_PATHS:
         return ""
 
+    if _db is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Firebase not configured. Set GOOGLE_APPLICATION_CREDENTIALS to enable auth.",
+        )
+
     auth_header = request.headers.get("authorization", "")
     if not auth_header.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
@@ -287,6 +307,8 @@ _DEFAULT_CONFIG: dict[str, Any] = {
     "upstream_url": "https://api.openai.com",
 }
 
+_CONFIG_DATA_DOC = "data"  # users/{uid}/config/data: { configs: [...], selected_id: str | None }
+
 _PROVIDER_DEFAULTS: dict[str, str] = {
     "openai": "https://api.openai.com",
     "anthropic": "https://api.anthropic.com",
@@ -298,6 +320,11 @@ PRO_DAILY_LIMIT = 10
 
 
 def _user_ref(uid: str):
+    if _db is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Firebase not configured. Set GOOGLE_APPLICATION_CREDENTIALS.",
+        )
     return _db.collection("users").document(uid)
 
 
@@ -332,16 +359,84 @@ def _ensure_user_doc(uid: str, email: str = "") -> dict[str, Any]:
     return data
 
 
+def _config_data_ref(uid: str):
+    return _user_ref(uid).collection("config").document(_CONFIG_DATA_DOC)
+
+
+def _config_current_ref(uid: str):
+    return _user_ref(uid).collection("config").document("current")
+
+
 def _load_config(uid: str) -> dict[str, Any]:
-    ref = _user_ref(uid).collection("config").document("current")
-    doc = ref.get()
+    """Return the selected config for the proxy (full api_key)."""
+    data_ref = _config_data_ref(uid)
+    doc = data_ref.get()
     if doc.exists:
-        return {**_DEFAULT_CONFIG, **doc.to_dict()}  # type: ignore[arg-type]
+        data = doc.to_dict() or {}
+        configs = data.get("configs") or []
+        selected_id = data.get("selected_id")
+        if selected_id and configs:
+            for c in configs:
+                if c.get("id") == selected_id:
+                    return {**_DEFAULT_CONFIG, **c}
+    # Legacy: single config at config/current
+    current_ref = _config_current_ref(uid)
+    leg = current_ref.get()
+    if leg.exists:
+        return {**_DEFAULT_CONFIG, **leg.to_dict()}  # type: ignore[arg-type]
     return dict(_DEFAULT_CONFIG)
 
 
-def _save_config(uid: str, cfg: dict[str, Any]) -> None:
-    _user_ref(uid).collection("config").document("current").set(cfg)
+def _get_config_list(uid: str) -> tuple[list[dict[str, Any]], str | None]:
+    """Return (configs with masked api_key, selected_id)."""
+    data_ref = _config_data_ref(uid)
+    doc = data_ref.get()
+    if doc.exists:
+        data = doc.to_dict() or {}
+        configs = list(data.get("configs") or [])
+        selected_id = data.get("selected_id")
+        out = []
+        for c in configs:
+            masked = dict(c)
+            key = masked.get("api_key", "")
+            if key and len(key) > 8:
+                masked["api_key"] = key[:4] + "..." + key[-4:]
+            out.append(masked)
+        return (out, selected_id)
+    # Legacy: build one entry from config/current
+    current_ref = _config_current_ref(uid)
+    leg = current_ref.get()
+    if leg.exists:
+        d = leg.to_dict() or {}
+        cid = d.get("id") or str(uuid.uuid4())
+        masked = dict(d)
+        key = masked.get("api_key", "")
+        if key and len(key) > 8:
+            masked["api_key"] = key[:4] + "..." + key[-4:]
+        masked["id"] = cid
+        masked.setdefault("name", "Default")
+        return ([masked], cid)
+    return ([], None)
+
+
+def _save_config_list(uid: str, configs: list[dict[str, Any]], selected_id: str | None) -> None:
+    _config_data_ref(uid).set({"configs": configs, "selected_id": selected_id})
+
+
+def _get_full_config_list(uid: str) -> list[dict[str, Any]]:
+    """Return configs with real api_key (for internal update). Migrate from legacy if needed."""
+    data_ref = _config_data_ref(uid)
+    doc = data_ref.get()
+    if doc.exists:
+        return list((doc.to_dict() or {}).get("configs") or [])
+    current_ref = _config_current_ref(uid)
+    leg = current_ref.get()
+    if leg.exists:
+        d = leg.to_dict() or {}
+        d["id"] = d.get("id") or str(uuid.uuid4())
+        d.setdefault("name", "Default")
+        return [d]
+    return []
 
 
 def _add_log_entry(
@@ -508,6 +603,21 @@ class ConfigPayload(BaseModel):
     upstream_url: str = Field(default="https://api.openai.com", max_length=512)
 
 
+class ConfigEntryPayload(BaseModel):
+    """Create or update a single config entry."""
+    id: str | None = Field(default=None, max_length=64)
+    name: str = Field(default="", max_length=128)
+    provider: str = Field(default="openai", max_length=64)
+    api_key: str = Field(default="", max_length=256)
+    model: str = Field(default="gpt-4o", max_length=128)
+    level: int = Field(default=2, ge=0, le=3)
+    upstream_url: str = Field(default="https://api.openai.com", max_length=512)
+
+
+class SelectedConfigPayload(BaseModel):
+    selected_id: str = Field(max_length=64)
+
+
 # ---------------------------------------------------------------------------
 # Public endpoints
 # ---------------------------------------------------------------------------
@@ -585,7 +695,7 @@ async def chat_endpoint(request: Request, req: ChatRequest, uid: str = Depends(_
 
 
 # ---------------------------------------------------------------------------
-# Dashboard API: config
+# Dashboard API: config (multiple configs + selected)
 # ---------------------------------------------------------------------------
 
 
@@ -593,29 +703,75 @@ async def chat_endpoint(request: Request, req: ChatRequest, uid: str = Depends(_
 def get_config(request: Request, uid: str = Depends(_get_uid)) -> dict[str, Any]:
     ip, ua = _req_meta(request)
     _ensure_user_doc(uid)
-    cfg = _load_config(uid)
+    configs, selected_id = _get_config_list(uid)
     _add_audit_log(uid, action="config.view", ip=ip, user_agent=ua)
-    masked = dict(cfg)
-    key = masked.get("api_key", "")
-    if key and len(key) > 8:
-        masked["api_key"] = key[:4] + "..." + key[-4:]
-    return masked
+    return {"configs": configs, "selected_id": selected_id}
 
 
 @app.post("/api/config")
-def set_config(request: Request, payload: ConfigPayload, uid: str = Depends(_get_uid)) -> dict[str, str]:
+def set_config(request: Request, payload: ConfigEntryPayload, uid: str = Depends(_get_uid)) -> dict[str, Any]:
     ip, ua = _req_meta(request)
     _ensure_user_doc(uid)
-    cfg = _load_config(uid)
+    _, selected_id = _get_config_list(uid)
+    full_list = _get_full_config_list(uid)
     new = payload.model_dump()
-    if new["api_key"] and "..." in new["api_key"]:
-        new["api_key"] = cfg.get("api_key", "")
-    cfg.update(new)
-    _save_config(uid, cfg)
-    _add_audit_log(uid, action="config.save", ip=ip, user_agent=ua, details={
-        "provider": new.get("provider"), "model": new.get("model"), "level": new.get("level"),
-    })
-    return {"status": "saved"}
+    if new.get("api_key") and "..." in new["api_key"]:
+        for c in full_list:
+            if c.get("id") == (payload.id or ""):
+                new["api_key"] = c.get("api_key", "")
+                break
+    entry_id = new.pop("id", None) or str(uuid.uuid4())
+    new["id"] = entry_id
+    if not new.get("name"):
+        new["name"] = f"Connection {len(full_list) + 1}"
+    found = False
+    for i, c in enumerate(full_list):
+        if c.get("id") == entry_id or c.get("id") == payload.id:
+            full_list[i] = {**c, **new}
+            found = True
+            break
+    if not found:
+        full_list.append(new)
+        if selected_id is None:
+            selected_id = entry_id
+    if selected_id is None and full_list:
+        selected_id = full_list[0].get("id")
+    _save_config_list(uid, full_list, selected_id)
+    _add_audit_log(uid, action="config.save", ip=ip, user_agent=ua, details={"id": entry_id})
+    configs_out, _ = _get_config_list(uid)
+    return {"status": "saved", "configs": configs_out, "selected_id": selected_id}
+
+
+@app.post("/api/config/selected")
+def set_selected_config(request: Request, payload: SelectedConfigPayload, uid: str = Depends(_get_uid)) -> dict[str, Any]:
+    ip, ua = _req_meta(request)
+    _ensure_user_doc(uid)
+    configs, _ = _get_config_list(uid)
+    ids = {c.get("id") for c in configs if c.get("id")}
+    if payload.selected_id not in ids:
+        raise HTTPException(status_code=400, detail="Invalid selected_id")
+    full_list = _get_full_config_list(uid)
+    _save_config_list(uid, full_list, payload.selected_id)
+    _add_audit_log(uid, action="config.select", ip=ip, user_agent=ua, details={"selected_id": payload.selected_id})
+    return {"status": "ok", "selected_id": payload.selected_id}
+
+
+@app.delete("/api/config/{config_id}")
+def delete_config(request: Request, config_id: str, uid: str = Depends(_get_uid)) -> dict[str, Any]:
+    ip, ua = _req_meta(request)
+    _ensure_user_doc(uid)
+    data_ref = _config_data_ref(uid)
+    doc = data_ref.get()
+    data = doc.to_dict() or {} if doc.exists else {}
+    full_list = list(data.get("configs") or [])
+    selected_id = data.get("selected_id")
+    full_list = [c for c in full_list if c.get("id") != config_id]
+    if selected_id == config_id:
+        selected_id = full_list[0].get("id") if full_list else None
+    _save_config_list(uid, full_list, selected_id)
+    _add_audit_log(uid, action="config.delete", ip=ip, user_agent=ua, details={"id": config_id})
+    configs_out, sel_out = _get_config_list(uid)
+    return {"status": "deleted", "configs": configs_out, "selected_id": sel_out}
 
 
 # ---------------------------------------------------------------------------
@@ -757,6 +913,10 @@ async def create_checkout(request: Request, uid: str = Depends(_get_uid)) -> dic
 @app.post("/api/stripe/webhook")
 async def stripe_webhook(request: Request) -> dict[str, str]:
     """Handle Stripe webhook events for subscription lifecycle."""
+    if _db is None:
+        logger.warning("Stripe webhook received but Firestore not configured; skipping processing")
+        return {"status": "ok"}
+
     body = await request.body()
     sig_header = request.headers.get("stripe-signature", "")
 

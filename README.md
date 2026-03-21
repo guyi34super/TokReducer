@@ -56,6 +56,18 @@ docker compose up --build
 
 When running in Docker, the Python backend uses the Rust compressor service for all compress/decompress operations. Set `RUST_COMPRESSOR_URL` in `.env` to override (e.g. for local dev with Rust running separately).
 
+### Firebase / running with auth
+
+The dashboard and API use Firebase Auth and Firestore when credentials are provided. To enable them:
+
+1. **Get a service account key** from [Firebase Console](https://console.firebase.google.com/) → Project Settings → Service Accounts → Generate New Private Key.
+2. **Provide credentials** in one of two ways:
+   - **File:** Save the JSON as `serviceAccountKey.json` in the project root (gitignored). Set `GOOGLE_APPLICATION_CREDENTIALS=./serviceAccountKey.json` in `.env` for local run.
+   - **Secrets manager / env:** Set `GOOGLE_APPLICATION_CREDENTIALS_JSON` to the full JSON string (e.g. from a secrets manager or CI). The backend accepts this so you never need to write the key to disk.
+3. **Local run:** Use either `GOOGLE_APPLICATION_CREDENTIALS` (file path) or `GOOGLE_APPLICATION_CREDENTIALS_JSON` in `.env`. Start the backend; it will load Firebase and enable auth/Firestore.
+4. **Docker:** The main `docker-compose.yml` does not reference the key file, so `docker compose up` always succeeds even without Firebase credentials (auth/Firestore are disabled in that case). To enable Firebase in Docker: ensure `serviceAccountKey.json` is in the project root, then run with both Compose files: `docker compose -f docker-compose.yml -f docker-compose.firebase.yml up`. The override injects the key as a read-only Docker secret at `/run/secrets/firebase-sa`. If the Agreement page shows that the agreement service is unavailable, ensure you are using the Firebase override and that `serviceAccountKey.json` exists.
+5. **Email verification:** After signup, Firebase sends a verification email. If it does not arrive: (a) In [Firebase Console](https://console.firebase.google.com/) ensure **Authentication → Sign-in method → Email/Password** is enabled. (b) Under **Authentication → Settings → Authorized domains**, add the domain you use (e.g. `localhost` for local dev, or your production host). (c) Check spam/junk. After clicking the link in the email, use **Resend** or sign out and sign in again if the app still says unverified (or refresh the page after a moment).
+
 ## Python Usage
 
 ### Basic Compression

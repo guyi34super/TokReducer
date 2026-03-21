@@ -1,0 +1,14 @@
+# Optional override: inject Firebase service account as a Docker secret.
+# Use when serviceAccountKey.json exists in the project root:
+#   docker compose -f docker-compose.yml -f docker-compose.firebase.yml up --build
+
+secrets:
+  firebase-sa:
+    file: ./serviceAccountKey.json
+
+services:
+  backend:
+    environment:
+      GOOGLE_APPLICATION_CREDENTIALS: /run/secrets/firebase-sa
+    secrets:
+      - firebase-sa

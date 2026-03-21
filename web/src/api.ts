@@ -57,30 +57,66 @@ async function resilientFetch(
 }
 
 // ---------------------------------------------------------------------------
-// Config
+// Config (multiple configs + selected)
 // ---------------------------------------------------------------------------
 
-export interface Config {
-  provider: string;
+export interface ConfigEntry {
+  id: string;
+  name?: string;
+  provider?: string;
   api_key: string;
-  model: string;
+  model?: string;
   level: number;
   upstream_url: string;
 }
 
-export async function fetchConfig(): Promise<Config> {
+export interface ConfigListResponse {
+  configs: ConfigEntry[];
+  selected_id: string | null;
+}
+
+export interface ConfigSavePayload {
+  id?: string;
+  name?: string;
+  provider?: string;
+  api_key: string;
+  model?: string;
+  level: number;
+  upstream_url: string;
+}
+
+export async function fetchConfigList(): Promise<ConfigListResponse> {
   const res = await resilientFetch(`${BASE}/api/config`, { headers: authHeaders() });
   if (!res.ok) throw new Error("Failed to load config");
   return res.json();
 }
 
-export async function saveConfig(cfg: Config): Promise<void> {
+export async function saveConfig(payload: ConfigSavePayload): Promise<ConfigListResponse> {
   const res = await resilientFetch(`${BASE}/api/config`, {
     method: "POST",
     headers: authHeaders(),
-    body: JSON.stringify(cfg),
+    body: JSON.stringify(payload),
   });
   if (!res.ok) throw new Error("Failed to save config");
+  return res.json();
+}
+
+export async function setSelectedConfig(selected_id: string): Promise<void> {
+  const res = await resilientFetch(`${BASE}/api/config/selected`, {
+    method: "POST",
+    headers: authHeaders(),
+    body: JSON.stringify({ selected_id }),
+  });
+  if (!res.ok) throw new Error("Failed to set selected config");
+}
+
+export async function deleteConfig(config_id: string): Promise<ConfigListResponse> {
+  const res = await resilientFetch(`${BASE}/api/config/${encodeURIComponent(config_id)}`, {
+    method: "DELETE",
+    headers: authHeaders(),
+  });
+  if (!res.ok) throw new Error("Failed to delete config");
+  return res.json();
 }
 
 // ---------------------------------------------------------------------------
@@ -117,49 +153,7 @@ export async function fetchLogs(limit = 100): Promise<LogsResponse> {
 }
 
 // ---------------------------------------------------------------------------
-// Audit Logs
-// ---------------------------------------------------------------------------
-
-export interface AuditEntry {
-  timestamp: string;
-  action: string;
-  ip: string;
-  user_agent: string;
-  details: Record<string, unknown>;
-}
-
-export interface AuditLogsResponse {
-  entries: AuditEntry[];
-}
-
-export async function fetchAuditLogs(limit = 200): Promise<AuditLogsResponse> {
-  const res = await resilientFetch(`${BASE}/api/audit-logs?limit=${limit}`, { headers: authHeaders() });
-  if (!res.ok) throw new Error("Failed to load audit logs");
-  return res.json();
-}
-
-// ---------------------------------------------------------------------------
-// Usage
-// ---------------------------------------------------------------------------
-
-export interface Usage {
-  tier: string;
-  used?: number;
-  limit?: number;
-  remaining?: number;
-  daily_used?: number;
-  daily_limit?: number;
-  daily_remaining?: number;
-}
-
-export async function fetchUsage(): Promise<Usage> {
-  const res = await resilientFetch(`${BASE}/api/usage`, { headers: authHeaders() });
-  if (!res.ok) throw new Error("Failed to load usage");
-  return res.json();
-}
-
-// ---------------------------------------------------------------------------
-// Agreement
+// Agreement (kept for optional future use)
 // ---------------------------------------------------------------------------
 
 export interface AgreementStatus {
@@ -167,9 +161,31 @@ export interface AgreementStatus {
   accepted_at: string | null;
 }
 
+const AGREEMENT_UNAVAILABLE_MSG =
+  "Agreement service unavailable: Firebase is not configured. Add the Firebase override and serviceAccountKey.json (see README).";
+
+async function agreementErrorFromResponse(res: Response): Promise<string> {
+  if (res.status === 503) {
+    try {
+      const body = await res.json();
+      const detail = body?.detail;
+      if (typeof detail === "string" && detail.length > 0) {
+        return `${AGREEMENT_UNAVAILABLE_MSG} (${detail})`;
+      }
+    } catch {
+      // body not JSON
+    }
+    return AGREEMENT_UNAVAILABLE_MSG;
+  }
+  return "Failed to check agreement";
+}
+
 export async function checkAgreement(): Promise<AgreementStatus> {
   const res = await resilientFetch(`${BASE}/api/agreement`, { headers: authHeaders() });
-  if (!res.ok) throw new Error("Failed to check agreement");
+  if (!res.ok) {
+    const msg = await agreementErrorFromResponse(res);
+    throw new Error(msg);
+  }
   return res.json();
 }
 
@@ -178,56 +194,37 @@ export async function acceptAgreement(): Promise<void> {
     method: "POST",
     headers: authHeaders(),
   });
-  if (!res.ok) throw new Error("Failed to accept agreement");
+  if (!res.ok) {
+    let msg: string;
+    if (res.status === 503) {
+      try {
+        const body = await res.json();
+        const detail = body?.detail;
+        msg =
+          typeof detail === "string" && detail.length > 0
+            ? `${AGREEMENT_UNAVAILABLE_MSG} (${detail})`
+            : AGREEMENT_UNAVAILABLE_MSG;
+      } catch {
+        msg = AGREEMENT_UNAVAILABLE_MSG;
+      }
+    } else {
+      msg = "Failed to accept agreement";
+    }
+    throw new Error(msg);
+  }
 }
 
-// ---------------------------------------------------------------------------
-// Test connection
-// ---------------------------------------------------------------------------
-
-export async function testConnection(): Promise<string> {
-  const res = await resilientFetch(`${BASE}/v1/chat/completions`, {
+/** POST agreement acceptance with an explicit token (e.g. right after signup, before context updates). */
+export async function acceptAgreementWithToken(token: string): Promise<void> {
+  const res = await fetch(`${BASE}/api/agreement`, {
     method: "POST",
-    headers: authHeaders(),
-    body: JSON.stringify({
-      model: "gpt-4o",
-      messages: [{ role: "user", content: "Say hello in one sentence." }],
-      max_tokens: 50,
-    }),
-    timeoutMs: PROXY_TIMEOUT_MS,
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+    },
   });
   if (!res.ok) {
-    const err = await res.text();
-    throw new Error(err);
+    throw new Error(res.status === 503 ? AGREEMENT_UNAVAILABLE_MSG : "Failed to accept agreement");
   }
-  const data = await res.json();
-  return data.choices?.[0]?.message?.content ?? "OK";
 }
 
-// ---------------------------------------------------------------------------
-// Stripe
-// ---------------------------------------------------------------------------
-
-export async function createCheckout(): Promise<string> {
-  const res = await resilientFetch(`${BASE}/api/stripe/create-checkout`, {
-    method: "POST",
-    headers: authHeaders(),
-  });
-  if (!res.ok) {
-    const err = await res.text();
-    throw new Error(err);
-  }
-  const data = await res.json();
-  return data.url;
-}
-
-export interface Subscription {
-  tier: string;
-  stripe_subscription_id: string | null;
-}
-
-export async function fetchSubscription(): Promise<Subscription> {
-  const res = await resilientFetch(`${BASE}/api/subscription`, { headers: authHeaders() });
-  if (!res.ok) throw new Error("Failed to load subscription");
-  return res.json();
-}

@@ -1,68 +1,40 @@
 import { useEffect, useState } from "react";
-import {
-  LogEntry,
-  LogsResponse,
-  fetchLogs,
-  AuditEntry,
-  AuditLogsResponse,
-  fetchAuditLogs,
-} from "../api";
+import { LogEntry, LogsResponse, fetchLogs } from "../api";
 import { sanitize } from "../utils/sanitize";
 
-type Tab = "requests" | "audit";
-
 export default function Logs() {
-  const [tab, setTab] = useState<Tab>("requests");
   const [data, setData] = useState<LogsResponse | null>(null);
-  const [auditData, setAuditData] = useState<AuditLogsResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     let active = true;
-
     async function poll() {
       try {
-        if (tab === "requests") {
-          const res = await fetchLogs(200);
-          if (active) { setData(res); setError(null); }
-        } else {
-          const res = await fetchAuditLogs(200);
-          if (active) { setAuditData(res); setError(null); }
+        const res = await fetchLogs(200);
+        if (active) {
+          setData(res);
+          setError(null);
         }
-      } catch (e: any) {
-        if (active) setError(e.message);
+      } catch (e: unknown) {
+        if (active) setError(e instanceof Error ? e.message : "Failed to load logs");
       }
     }
-
     poll();
     const id = setInterval(poll, 3000);
-    return () => { active = false; clearInterval(id); };
-  }, [tab]);
+    return () => {
+      active = false;
+      clearInterval(id);
+    };
+  }, []);
 
   if (error) return <div className="msg err">{error}</div>;
 
-  return (
-    <section className="page">
-      <div className="tab-bar">
-        <button className={tab === "requests" ? "tab active" : "tab"} onClick={() => setTab("requests")}>
-          Request Log
-        </button>
-        <button className={tab === "audit" ? "tab active" : "tab"} onClick={() => setTab("audit")}>
-          Audit Log
-        </button>
-      </div>
-
-      {tab === "requests" ? <RequestLogView data={data} /> : <AuditLogView data={auditData} />}
-    </section>
-  );
-}
-
-function RequestLogView({ data }: { data: LogsResponse | null }) {
   if (!data) return <p>Loading...</p>;
+
   const { entries, summary } = data;
 
   return (
-    <>
+    <section className="page">
       <div className="summary-bar">
         <div className="stat">
           <span className="stat-value">{summary.total_requests}</span>
@@ -111,46 +83,16 @@ function RequestLogView({ data }: { data: LogsResponse | null }) {
                   <td>
                     <span className={e.status === "ok" ? "badge ok" : "badge err"}>{e.status}</span>
                   </td>
-                  <td className="ua-cell" title={sanitize(e.user_agent || "")}>{truncateUA(sanitize(e.user_agent || "-"))}</td>
+                  <td className="ua-cell" title={sanitize(e.user_agent || "")}>
+                    {truncateUA(sanitize(e.user_agent || "-"))}
+                  </td>
                 </tr>
               ))}
             </tbody>
           </table>
         </div>
       )}
-    </>
-  );
-}
-
-function AuditLogView({ data }: { data: AuditLogsResponse | null }) {
-  if (!data) return <p>Loading...</p>;
-  const { entries } = data;
-
-  return entries.length === 0 ? (
-    <p className="empty">No audit events recorded yet.</p>
-  ) : (
-    <div className="table-wrap">
-      <table>
-        <thead>
-          <tr>
-            <th>Time</th>
-            <th>Action</th>
-            <th>IP</th>
-            <th>Details</th>
-          </tr>
-        </thead>
-        <tbody>
-          {entries.map((e: AuditEntry, i: number) => (
-            <tr key={i}>
-              <td className="mono">{formatTime(e.timestamp)}</td>
-              <td><span className="badge action">{e.action}</span></td>
-              <td className="mono">{e.ip || "-"}</td>
-              <td className="details-cell">{formatDetails(e.details)}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
+    </section>
   );
 }
 
@@ -164,10 +106,4 @@ function formatTime(iso: string): string {
 
 function truncateUA(ua: string): string {
   return ua.length > 40 ? ua.slice(0, 37) + "..." : ua;
-}
-
-function formatDetails(details: Record<string, unknown>): string {
-  const keys = Object.keys(details);
-  if (keys.length === 0) return "-";
-  return sanitize(keys.map((k) => `${k}: ${details[k]}`).join(", "));
 }

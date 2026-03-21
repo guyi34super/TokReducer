@@ -9,6 +9,7 @@ import {
   onAuthStateChanged,
   signInWithEmailAndPassword,
   createUserWithEmailAndPassword,
+  sendEmailVerification,
   signOut,
   type User,
 } from "firebase/auth";
@@ -63,6 +64,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   async function signup(email: string, password: string) {
     const cred = await createUserWithEmailAndPassword(auth, email, password);
+    const continueUrl =
+      typeof window !== "undefined" ? `${window.location.origin}/` : undefined;
+    await sendEmailVerification(cred.user, continueUrl ? { url: continueUrl } : undefined);
     const token = await cred.user.getIdToken();
     setIdToken(token);
   }

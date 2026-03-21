@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useAuth } from "../context/AuthContext";
-import { useNavigate, Link } from "react-router-dom";
+import { useNavigate } from "react-router-dom";
 
 export default function Login() {
   const { login, signup } = useAuth();
@@ -9,18 +9,13 @@ export default function Login() {
   const [mode, setMode] = useState<"login" | "signup">("login");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [agreed, setAgreed] = useState(false);
+  const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
-
-    if (mode === "signup" && !agreed) {
-      setError("You must accept the license agreement to create an account.");
-      return;
-    }
 
     setLoading(true);
     try {
@@ -38,8 +33,12 @@ export default function Login() {
         setError("An account with this email already exists.");
       } else if (code === "auth/weak-password") {
         setError("Password must be at least 6 characters.");
+      } else if (code === "auth/too-many-requests") {
+        setError("Too many attempts. Wait a few minutes and try again.");
+      } else if (code === "auth/network-request-failed") {
+        setError("Network error. Check your connection and try again.");
       } else {
-        setError(err.message || "Authentication failed.");
+        setError(err?.message || "Authentication failed.");
       }
     } finally {
       setLoading(false);
@@ -82,7 +81,7 @@ export default function Login() {
           <label>
             Password
             <input
-              type="password"
+              type={showPassword ? "text" : "password"}
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               required
@@ -90,22 +89,14 @@ export default function Login() {
               autoComplete={mode === "login" ? "current-password" : "new-password"}
             />
           </label>
-
-          {mode === "signup" && (
-            <label className="checkbox-label">
-              <input
-                type="checkbox"
-                checked={agreed}
-                onChange={(e) => setAgreed(e.target.checked)}
-              />
-              <span>
-                I have read and accept the{" "}
-                <Link to="/agreement" target="_blank">
-                  TokReducer License Agreement
-                </Link>
-              </span>
-            </label>
-          )}
+          <label className="checkbox-label">
+            <input
+              type="checkbox"
+              checked={showPassword}
+              onChange={(e) => setShowPassword(e.target.checked)}
+            />
+            <span>Show password</span>
+          </label>
 
           {error && <div className="msg err">{error}</div>}
 
